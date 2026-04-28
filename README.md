@@ -218,10 +218,10 @@ This creates a full closed-loop demo.
 Typical files:
 
 ```text
-ackermann_car/model.sdf
-worlds/ackermann_adjusted.world
+ackermann_adjusted.world
 yellow_line_tracking.py
-moza_udp_ffb.cpp
+udp_receiver.py
+cpp/wheelproject.cpp
 README.md
 ```
 
