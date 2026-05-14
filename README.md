@@ -4,7 +4,7 @@
 
 **Motivation:**
 
-TODO: Add personal motivation here.
+I chose this project to combine the skills we learned involving visual line tracking/following with my interest in sim racing wheels/automated self-moving systems.
 
 This project demonstrates a physical-feedback self-driving simulation pipeline that connects a Gazebo vehicle simulation to a real MOZA R3 racing wheel. The simulated vehicle uses a camera mounted on an Ackermann steering car to follow a yellow line on a Gazebo track. A Python ROS 2 node processes the camera feed with OpenCV, computes a steering command, drives the simulated car through `/cmd_vel`, and simultaneously sends that steering command over UDP to a Windows C++ DirectInput program that physically turns the MOZA wheel.
 
@@ -25,34 +25,18 @@ The result is a mixed simulation/hardware demonstration: the vehicle drives arou
 
 ### YouTube Demo
 
-TODO: Add YouTube video link here.
 
-Example placeholder:
 
 ```text
-https://www.youtube.com/watch?v=YOUR_VIDEO_ID
+https://youtu.be/fo5TVMJ5C2c
 ```
 
-### What the Demo Shows
+The final system demonstrates an Ackermann steering car driving forward in Gazebo while following a yellow path painted on the ground plane. The car has a front-mounted camera sensor that publishes images from the vehicle's point of view. A Python ROS 2 node subscribes to this camera feed, finds the yellow line using cv2, finds the centroid of the visible line, and converts the offset from image center into a normalized steering command. It sends the steering value over UDP from WSL to Windows, where a C++ DirectInput controller converts it into force feedback commands for the MOZA wheel.
 
-The final system demonstrates an Ackermann steering car driving forward in Gazebo while following a yellow path painted on the ground plane. The car has a front-mounted camera sensor that publishes images from the vehicle's point of view. A Python ROS 2 node subscribes to this camera feed, thresholds the image for yellow, finds the centroid of the visible line, and converts the offset from image center into a normalized steering command.
+When the simulated line turns right, the simulated car turns right and the real wheel turns right. When the line turns left, the real wheel turns left. The final C++ controller uses target-angle PD control so the wheel does not spin endlessly.  While this proved to be imperfect (sometimes the wheel could continually turn in one direction, as opposed to realistic steering), it ideally moves toward a target steering angle and holds that angle more like a real steering wheel.
 
-That steering command is used in two places:
-
-1. It publishes a ROS 2 `/cmd_vel` command to steer and move the simulated Ackermann car.
-2. It sends the same steering value over UDP from WSL to Windows, where a C++ DirectInput controller converts it into force feedback commands for the MOZA wheel.
-
-When the simulated line turns right, the simulated car turns right and the real wheel turns right. When the line turns left, the real wheel turns left. The final C++ controller uses target-angle PD control so the wheel does not spin endlessly. Instead, it moves toward a target steering angle and holds that angle more like a real steering wheel.
-
-### Suggested Screenshots / Video Clips to Include
-
-Add screenshots or clips showing:
-
-* Gazebo world with the Ackermann car and yellow track
-* The camera view or `/debug_camera/image` output
-* The Python terminal showing detected yellow line position and steering values
-* The Windows C++ controller showing received steering values and wheel control output
-* The physical MOZA wheel moving while the Gazebo car follows the line
+![Wheel Setup](wheelsetup.jpg)
+![Course Setup](coursescreenshot.png)
 
 ---
 
@@ -83,13 +67,12 @@ MOZA R3 Force Feedback Wheel
 
 ## Repository Contents
 
-Suggested repository structure:
-
 ```text
 .
 ├── README.md
 ├── yellow_line_tracking.py
-├── moza_udp_ffb.cpp
+├── cpp
+│   └── wheelproject.cpp
 ├── worlds
 │   └── ackermann_adjusted.world
 ├── models
@@ -108,7 +91,7 @@ yellow_line_tracking.py
 ROS 2 Python node that subscribes to the Gazebo camera image, detects the yellow line, publishes `/cmd_vel`, and sends UDP steering values to Windows.
 
 ```text
-moza_udp_ffb.cpp
+wheelproject.cpp
 ```
 
 Windows C++ DirectInput program that receives UDP steering values and applies target-angle force feedback to the MOZA wheel.
@@ -135,28 +118,10 @@ Track image used as the ground texture. The yellow line is detected by the OpenC
 
 ## Installation Instructions
 
-These instructions assume a Windows 11 computer using WSL 2 with Ubuntu, ROS 2 Jazzy, Gazebo Harmonic, Visual Studio, and a MOZA R3 wheel.
+These instructions assume a Windows 11 system using WSL 2 with Ubuntu, ROS 2 Jazzy, Gazebo Harmonic, Visual Studio, and a MOZA R3 wheel.
 
-### 1. Install WSL 2 and Ubuntu
 
-On Windows PowerShell as Administrator:
-
-```powershell
-wsl --install
-```
-
-Restart if prompted. Then install or open Ubuntu from the Microsoft Store.
-
-Update Ubuntu packages:
-
-```bash
-sudo apt update
-sudo apt upgrade -y
-```
-
----
-
-### 2. Install ROS 2 Jazzy
+### 1. Install ROS 2 Jazzy
 
 Set locale:
 
@@ -208,7 +173,7 @@ echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
 
 ---
 
-### 3. Install Gazebo Harmonic and ROS/Gazebo Bridge
+### 2. Install Gazebo Harmonic and ROS/Gazebo Bridge
 
 Install Gazebo Harmonic and ROS/Gazebo bridge packages:
 
@@ -225,7 +190,7 @@ gz sim --version
 
 ---
 
-### 4. Install Python Dependencies
+### 3. Install Python Dependencies
 
 Install Python packages needed by the ROS node:
 
@@ -235,7 +200,7 @@ sudo apt install -y python3-opencv python3-numpy ros-jazzy-cv-bridge
 
 ---
 
-### 5. Install Windows C++ Build Tools
+### 4. Install Windows C++ Build Tools
 
 Install Visual Studio 2022 with:
 
@@ -261,11 +226,11 @@ The source file also includes these pragmas, so Visual Studio should link them a
 
 ---
 
-### 6. Connect the MOZA Wheel
+### 5. Connect the MOZA Wheel
 
 Before running the C++ wheel controller:
 
-* Connect the MOZA R3 wheel and pedals to the Windows machine.
+* Connect the MOZA R3 wheel to the Windows machine.
 * Confirm Windows can see the wheel.
 * Close MOZA Pit House before running the C++ controller.
 * Run the C++ program as Administrator.
@@ -606,8 +571,6 @@ The C++ debug output includes the current logical wheel angle. When the wheel ph
 
 * Generic DirectInput force feedback examples were only partially useful because many examples assume older joysticks or gamepads rather than modern racing wheel bases.
 * DirectInput direction-vector examples were less useful for this wheel. The working behavior used signed constant-force magnitude instead.
-* General ROS/Gazebo tutorials were useful for setup, but many did not cover the exact Gazebo Harmonic + ROS 2 Jazzy + WSL + Windows hardware-in-the-loop workflow used here.
-* Generic WSL networking examples were somewhat confusing because `127.0.0.1` from WSL did not work for sending UDP to the Windows receiver. Using the Windows IPv4 address from `ipconfig` worked.
 
 ---
 
@@ -626,26 +589,8 @@ The current course demonstrates line following and left/right steering, but more
 
 This would make the computer vision and control problem more realistic.
 
----
 
-### 2. Improve Computer Vision Robustness
-
-The current OpenCV logic uses a simple HSV threshold for yellow. This works well for the current Gazebo track, but it is sensitive to color, lighting, and camera angle.
-
-Future improvements:
-
-* Add dynamic threshold tuning.
-* Add morphological filtering controls.
-* Use contour filtering by area.
-* Ignore yellow detections that are too small or too high in the image.
-* Add debug image output showing the mask and detected centroid.
-* Use a lookahead point instead of the full yellow mask centroid.
-
-A lookahead-based method would likely improve path following because the car would steer based on the path farther ahead, not just the average of all visible yellow pixels.
-
----
-
-### 3. Improve Vehicle Control
+### 2. Improve Vehicle Control
 
 The current simulated car control is proportional line following. It works, but may oscillate at higher speeds.
 
@@ -659,22 +604,7 @@ Future improvements:
 
 ---
 
-### 4. Improve Wheel Force Feedback Realism
-
-The final wheel controller uses target-angle PD control, which is much better than raw continuous force control. However, it is still a simplified force feedback model.
-
-Future improvements:
-
-* Read more accurate wheel angle data if available.
-* Add soft end stops.
-* Add self-centering force that varies with simulated speed.
-* Add road texture or vibration effects.
-* Add configurable steering ratio.
-* Add a small GUI for tuning `KP`, `KD`, max angle, and max force live.
-
----
-
-### 5. Combine Bridge Commands into a Launch Script
+### 3. Combine Bridge Commands into a Launch Script
 
 Currently, multiple terminals are used:
 
@@ -709,63 +639,6 @@ python3 yellow_line_tracking.py
 
 ---
 
-### 6. Configuration File Support
+### 4. Apply to an actual racetrack course
+I think it would be interesting to find or create an actual racetrack course in gazebo, with obstacles and realistic assets, and have the car navigate the track, likely using other modes of path following beyond just a yellow line.
 
-Several important values are currently hard-coded, including:
-
-* Windows UDP IP address
-* UDP port
-* camera topic
-* `/cmd_vel` topic
-* forward speed
-* steering gain
-* C++ force feedback gains
-
-Future work could move these into a config file such as:
-
-```text
-config.yaml
-```
-
-This would make the project easier to reuse on other machines.
-
----
-
-### 7. Better Cross-Platform Networking Setup
-
-The UDP connection currently requires manually setting the Windows IPv4 address in Python. A more robust approach would:
-
-* automatically detect the Windows host IP from WSL
-* allow command-line override
-* print a clear startup warning if packets fail
-* include a heartbeat message between Python and C++
-
----
-
-### 8. Package the ROS Node Properly
-
-The Python file is currently run directly. Future work could turn it into a formal ROS 2 package with:
-
-* `package.xml`
-* `setup.py`
-* launch files
-* parameters
-* proper install rules
-
-This would make it easier to run with standard ROS 2 commands.
-
----
-
-## Project Status
-
-The final project successfully demonstrates a hardware-in-the-loop Gazebo driving demo:
-
-* Gazebo car camera publishes image data.
-* ROS 2 receives the image stream.
-* Python/OpenCV detects a yellow line.
-* The simulated car follows the line.
-* Steering commands are sent from WSL to Windows over UDP.
-* A Windows C++ DirectInput controller moves the physical MOZA wheel.
-* The wheel uses target-angle PD control for more realistic behavior.
-
-The main remaining improvements are polish, easier launch automation, better vision robustness, and more advanced vehicle/wheel control models.
