@@ -1,15 +1,19 @@
 #define DIRECTINPUT_VERSION 0x0800
 
-#include <windows.h>
-#include <dinput.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <dinput.h>
 
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <iomanip>
 #include <string>
-#include <vector>
 
 #pragma comment(lib, "dinput8.lib")
 #pragma comment(lib, "dxguid.lib")
@@ -23,9 +27,19 @@ struct AppState
 
     DWORD xAxisObjectId = 0;
     bool foundXAxisActuator = false;
+
+    LONG axisMin = -10000;
+    LONG axisMax = 10000;
+    LONG axisCenter = 0;
 };
 
 static AppState g_state;
+
+template <typename T>
+static T Clamp(T value, T low, T high)
+{
+    return (value < low) ? low : (value > high ? high : value);
+}
 
 static std::wstring GuidToName(const GUID& guid)
 {
@@ -55,9 +69,19 @@ static LRESULT CALLBACK DummyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+static void PumpWindowMessages()
+{
+    MSG msg;
+    while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+}
+
 static HWND CreateDummyWindow(HINSTANCE hInstance)
 {
-    const wchar_t CLASS_NAME[] = L"MozaFFBTestWindow";
+    const wchar_t CLASS_NAME[] = L"MozaFFBTargetAngleWindow";
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = DummyWndProc;
@@ -69,9 +93,9 @@ static HWND CreateDummyWindow(HINSTANCE hInstance)
     HWND hwnd = CreateWindowExW(
         0,
         CLASS_NAME,
-        L"MOZA FFB UDP Steering",
+        L"MOZA FFB Target Angle",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 320, 240,
+        CW_USEDEFAULT, CW_USEDEFAULT, 360, 220,
         nullptr,
         nullptr,
         hInstance,
@@ -182,6 +206,40 @@ static bool InitDirectInput()
     return true;
 }
 
+static bool AcquireDeviceWithRetry(int attempts = 50, int sleepMs = 250)
+{
+    HRESULT hr = E_FAIL;
+
+    std::cout << "[Init] Attempting to acquire device...\n";
+    std::cout << "[Init] Click the MOZA FFB Target Angle window if needed.\n";
+
+    for (int attempt = 1; attempt <= attempts; ++attempt)
+    {
+        PumpWindowMessages();
+
+        ShowWindow(g_state.hwnd, SW_SHOW);
+        SetForegroundWindow(g_state.hwnd);
+        SetActiveWindow(g_state.hwnd);
+        SetFocus(g_state.hwnd);
+
+        hr = g_state.device->Acquire();
+        if (SUCCEEDED(hr))
+        {
+            std::cout << "[Init] Acquire ok on attempt " << attempt << ".\n";
+            return true;
+        }
+
+        std::cout << "[Init] Acquire attempt " << attempt << " failed: 0x"
+            << std::hex << std::setw(8) << std::setfill('0') << hr
+            << std::dec << std::setfill(' ') << "\n";
+
+        Sleep(sleepMs);
+    }
+
+    PrintHresult("Acquire failed after retries", hr);
+    return false;
+}
+
 static bool OpenFFBDevice()
 {
     HRESULT hr = g_state.di->EnumDevices(
@@ -213,9 +271,8 @@ static bool OpenFFBDevice()
 
     hr = g_state.device->SetCooperativeLevel(
         g_state.hwnd,
-        DISCL_FOREGROUND | DISCL_EXCLUSIVE
+        DISCL_BACKGROUND | DISCL_EXCLUSIVE
     );
-
     if (FAILED(hr))
     {
         PrintHresult("SetCooperativeLevel failed", hr);
@@ -238,15 +295,8 @@ static bool OpenFFBDevice()
     }
     std::cout << "[Init] Axis mode ABS ok.\n";
 
-    Sleep(300);
-
-    hr = g_state.device->Acquire();
-    if (FAILED(hr))
-    {
-        PrintHresult("Acquire failed", hr);
+    if (!AcquireDeviceWithRetry())
         return false;
-    }
-    std::cout << "[Init] Acquire ok.\n";
 
     return true;
 }
@@ -275,7 +325,6 @@ static bool EnumerateAxesAndEffects()
         << std::hex << g_state.xAxisObjectId << std::dec << '\n';
 
     std::cout << "[Init] Enumerating supported effects...\n";
-
     hr = g_state.device->EnumEffects(
         EnumEffectsCallback,
         nullptr,
@@ -288,6 +337,28 @@ static bool EnumerateAxesAndEffects()
         return false;
     }
 
+    return true;
+}
+
+static bool ConfigureXAxisRange()
+{
+    DIPROPRANGE rangeProp = {};
+    rangeProp.diph.dwSize = sizeof(DIPROPRANGE);
+    rangeProp.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    rangeProp.diph.dwObj = g_state.xAxisObjectId;
+    rangeProp.diph.dwHow = DIPH_BYID;
+    rangeProp.lMin = g_state.axisMin;
+    rangeProp.lMax = g_state.axisMax;
+
+    HRESULT hr = g_state.device->SetProperty(DIPROP_RANGE, &rangeProp.diph);
+    if (FAILED(hr))
+    {
+        PrintHresult("SetProperty(DIPROP_RANGE) failed", hr);
+        return false;
+    }
+
+    std::cout << "[Init] X axis range set to [" << g_state.axisMin
+        << ", " << g_state.axisMax << "]\n";
     return true;
 }
 
@@ -311,9 +382,80 @@ static bool TryDisableAutocenter()
     return true;
 }
 
+static bool ReadJoystickState(DIJOYSTATE& js)
+{
+    HRESULT hr = g_state.device->Poll();
+
+    if (FAILED(hr))
+    {
+        g_state.device->Acquire();
+    }
+
+    hr = g_state.device->GetDeviceState(sizeof(js), &js);
+    if (FAILED(hr))
+    {
+        g_state.device->Acquire();
+        hr = g_state.device->GetDeviceState(sizeof(js), &js);
+        if (FAILED(hr))
+        {
+            PrintHresult("GetDeviceState failed", hr);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool CalibrateWheelCenter()
+{
+    std::cout << "[Cal] Centering calibration starting.\n";
+    std::cout << "[Cal] Please let go of the wheel and do not touch it for ~1 second.\n";
+
+    long long sum = 0;
+    int count = 0;
+
+    auto start = std::chrono::steady_clock::now();
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count() < 1000)
+    {
+        DIJOYSTATE js = {};
+        if (ReadJoystickState(js))
+        {
+            sum += js.lX;
+            ++count;
+        }
+
+        PumpWindowMessages();
+        Sleep(20);
+    }
+
+    if (count == 0)
+    {
+        std::cout << "[Cal] Failed to read joystick state during calibration.\n";
+        return false;
+    }
+
+    g_state.axisCenter = static_cast<LONG>(sum / count);
+
+    std::cout << "[Cal] axisCenter = " << g_state.axisCenter << "\n";
+    return true;
+}
+
+static double RawAxisToAngleDeg(LONG rawAxis, double maxWheelAngleDeg)
+{
+    const double halfRange = (g_state.axisMax - g_state.axisMin) / 2.0;
+    if (halfRange <= 0.0)
+        return 0.0;
+
+    double normalized = static_cast<double>(rawAxis - g_state.axisCenter) / halfRange;
+    normalized = Clamp(normalized, -1.0, 1.0);
+
+    return normalized * maxWheelAngleDeg;
+}
+
 void RunLiveSteeringTest()
 {
-    std::cout << "\n[Test] UDP steering mode\n";
+    std::cout << "\n[Test] UDP steering target-angle mode\n";
     std::cout << "[Test] Listening for steering values on UDP port 5005.\n";
     std::cout << "[Test] Expected values: -1.0 to +1.0\n";
     std::cout << "[Test] Press ESC to quit.\n";
@@ -358,7 +500,7 @@ void RunLiveSteeringTest()
     LONG direction[1] = { 0 };
 
     DICONSTANTFORCE cf = {};
-    cf.lMagnitude = 1;
+    cf.lMagnitude = 0;
 
     DIEFFECT effect = {};
     effect.dwSize = sizeof(effect);
@@ -393,8 +535,6 @@ void RunLiveSteeringTest()
         return;
     }
 
-    std::cout << "[Test] ConstantForce created.\n";
-
     hr = fx->Start(1, 0);
     if (FAILED(hr))
     {
@@ -405,27 +545,63 @@ void RunLiveSteeringTest()
         return;
     }
 
-    std::cout << "[Test] ConstantForce started.\n";
+    std::cout << "[Test] ConstantForce effect started.\n";
 
-    const LONG MAX_FORCE = DI_FFNOMINALMAX / 2;
+    // ------------------------------------------------------------
+    // TUNING CONSTANTS
+    // ------------------------------------------------------------
 
-    // Your previous calibration:
+    // Keep this modest. The Python steering value does not need to map
+    // to full real wheel lock.
+    constexpr double MAX_WHEEL_ANGLE_DEG = 120.0;
+
+    // Start gentle. Increase KP only after direction is correct.
+    constexpr double KP = 18.0;
+
+    // Damping. Increase if the wheel oscillates.
+    constexpr double KD = 0.45;
+
+    // Force clamp. Start lower than full force for safety.
+    constexpr LONG MAX_FORCE = DI_FFNOMINALMAX / 3;
+
+    // Logical convention used in this controller:
+    // positive logical steering/angle/force = right
+    //
+    // DirectInput signed force convention from your earlier test:
     // positive signed force = left
     // negative signed force = right
     //
-    // Python convention:
-    // positive steering = yellow line is to the right
+    // Therefore logical right force must become negative DirectInput force.
+    constexpr int DIRECTINPUT_FORCE_SIGN = -1;
+
+    // This is the important one to flip if the wheel runs away to full lock.
     //
-    // Therefore invert steering before applying force.
-    const int FORCE_SIGN = -1;
+    // If physically turning the wheel right makes currentLogicalDeg increase,
+    // leave this as +1.
+    //
+    // If physically turning the wheel right makes currentLogicalDeg decrease,
+    // set this to -1.
+    constexpr int WHEEL_AXIS_SIGN = 1;
+
+    constexpr int PACKET_TIMEOUT_MS = 500;
+
+    // Small deadband so tiny steering corrections do not constantly push the wheel.
+    constexpr double STEERING_DEADBAND = 0.03;
+
+    // ------------------------------------------------------------
 
     float latestSteering = 0.0f;
+    double smoothedSteering = 0.0;
+    double previousLogicalDeg = 0.0;
 
     auto lastPacketTime = std::chrono::steady_clock::now();
+    auto lastLoopTime = std::chrono::steady_clock::now();
     auto lastPrintTime = std::chrono::steady_clock::now();
 
     while (!(GetAsyncKeyState(VK_ESCAPE) & 0x8000))
     {
+        PumpWindowMessages();
+
         char buffer[128] = {};
         sockaddr_in senderAddr = {};
         int senderAddrSize = sizeof(senderAddr);
@@ -446,12 +622,7 @@ void RunLiveSteeringTest()
             try
             {
                 latestSteering = std::stof(buffer);
-
-                if (latestSteering > 1.0f)
-                    latestSteering = 1.0f;
-                else if (latestSteering < -1.0f)
-                    latestSteering = -1.0f;
-
+                latestSteering = Clamp(latestSteering, -1.0f, 1.0f);
                 lastPacketTime = std::chrono::steady_clock::now();
             }
             catch (...)
@@ -461,24 +632,83 @@ void RunLiveSteeringTest()
         }
 
         auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - lastLoopTime).count();
+        lastLoopTime = now;
 
-        auto msSinceLastPacket =
+        if (dt <= 0.000001)
+            dt = 0.01;
+
+        const auto msSinceLastPacket =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - lastPacketTime
             ).count();
 
-        // Safety fallback:
-        // If steering packets stop, remove force from the wheel.
-        if (msSinceLastPacket > 500)
+        if (msSinceLastPacket > PACKET_TIMEOUT_MS)
         {
             latestSteering = 0.0f;
         }
 
-        LONG signedForce = static_cast<LONG>(
-            latestSteering * MAX_FORCE * FORCE_SIGN
-            );
+        // Smooth the incoming steering command.
+        smoothedSteering = 0.85 * smoothedSteering + 0.15 * latestSteering;
 
-        cf.lMagnitude = signedForce;
+        if (std::abs(smoothedSteering) < STEERING_DEADBAND)
+        {
+            smoothedSteering = 0.0;
+        }
+
+        DIJOYSTATE js = {};
+        if (!ReadJoystickState(js))
+        {
+            std::cout << "[Wheel] Failed reading joystick state, skipping loop.\n";
+            Sleep(20);
+            continue;
+        }
+
+        const LONG currentRawAxis = js.lX;
+
+        // RawAxisToAngleDeg returns raw device angle.
+        // WHEEL_AXIS_SIGN converts it to our logical convention:
+        // positive logical angle = right.
+        const double currentRawDeg =
+            RawAxisToAngleDeg(currentRawAxis, MAX_WHEEL_ANGLE_DEG);
+
+        const double currentLogicalDeg =
+            WHEEL_AXIS_SIGN * currentRawDeg;
+
+        const double targetLogicalDeg =
+            smoothedSteering * MAX_WHEEL_ANGLE_DEG;
+
+        const double errorDeg =
+            targetLogicalDeg - currentLogicalDeg;
+
+        const double velocityDegPerSec =
+            (currentLogicalDeg - previousLogicalDeg) / dt;
+
+        previousLogicalDeg = currentLogicalDeg;
+
+        // Logical force:
+        // positive = push right
+        // negative = push left
+        double logicalForce =
+            KP * errorDeg - KD * velocityDegPerSec;
+
+        logicalForce = Clamp(
+            logicalForce,
+            static_cast<double>(-MAX_FORCE),
+            static_cast<double>(MAX_FORCE)
+        );
+
+        // Convert logical force to DirectInput signed magnitude.
+        LONG signedDirectInputForce =
+            static_cast<LONG>(logicalForce * DIRECTINPUT_FORCE_SIGN);
+
+        signedDirectInputForce = Clamp(
+            signedDirectInputForce,
+            -MAX_FORCE,
+            MAX_FORCE
+        );
+
+        cf.lMagnitude = signedDirectInputForce;
 
         hr = fx->SetParameters(&effect, DIEP_TYPESPECIFICPARAMS);
         if (FAILED(hr))
@@ -487,19 +717,29 @@ void RunLiveSteeringTest()
             break;
         }
 
-        auto msSinceLastPrint =
+        const auto msSinceLastPrint =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - lastPrintTime
             ).count();
 
         if (msSinceLastPrint > 250)
         {
-            std::cout << "[UDP] steering=" << latestSteering
-                << " signedForce=" << signedForce << "\n";
+            std::cout << std::fixed << std::setprecision(2)
+                << "[CTRL] rawSteer=" << latestSteering
+                << " smoothSteer=" << smoothedSteering
+                << " targetDeg=" << targetLogicalDeg
+                << " currentRaw=" << currentRawAxis
+                << " rawDeg=" << currentRawDeg
+                << " logicalDeg=" << currentLogicalDeg
+                << " errorDeg=" << errorDeg
+                << " logicalForce=" << logicalForce
+                << " DIForce=" << signedDirectInputForce
+                << "\n";
+
             lastPrintTime = now;
         }
 
-        Sleep(20);
+        Sleep(10);
     }
 
     std::cout << "[Test] Stopping force.\n";
@@ -512,71 +752,6 @@ void RunLiveSteeringTest()
 
     closesocket(udpSocket);
     WSACleanup();
-}
-
-static bool RunSpringTest()
-{
-    std::cout << "\n[Test] Spring effect\n";
-
-    DWORD axes[1] = { g_state.xAxisObjectId };
-    LONG direction[1] = { 0 };
-
-    DICONDITION cond = {};
-    cond.lOffset = 5000;
-    cond.lPositiveCoefficient = 10000;
-    cond.lNegativeCoefficient = 10000;
-    cond.dwPositiveSaturation = DI_FFNOMINALMAX;
-    cond.dwNegativeSaturation = DI_FFNOMINALMAX;
-    cond.lDeadBand = 0;
-
-    DIEFFECT effect = {};
-    effect.dwSize = sizeof(effect);
-    effect.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTIDS;
-    effect.dwDuration = 3 * DI_SECONDS;
-    effect.dwSamplePeriod = 0;
-    effect.dwGain = DI_FFNOMINALMAX;
-    effect.dwTriggerButton = DIEB_NOTRIGGER;
-    effect.cAxes = 1;
-    effect.rgdwAxes = axes;
-    effect.rglDirection = direction;
-    effect.cbTypeSpecificParams = sizeof(cond);
-    effect.lpvTypeSpecificParams = &cond;
-
-    IDirectInputEffect* fx = nullptr;
-
-    HRESULT hr = g_state.device->CreateEffect(GUID_Spring, &effect, &fx, nullptr);
-    if (FAILED(hr))
-    {
-        PrintHresult("CreateEffect(Spring) failed", hr);
-        return false;
-    }
-
-    std::cout << "[Test] Spring CreateEffect ok.\n";
-
-    hr = fx->Start(1, 0);
-    if (FAILED(hr))
-    {
-        PrintHresult("Start(Spring) failed", hr);
-        fx->Release();
-        return false;
-    }
-
-    std::cout << "[Test] Spring started for 3s.\n";
-
-    Sleep(3000);
-
-    hr = fx->Stop();
-    if (FAILED(hr))
-    {
-        PrintHresult("Stop(Spring) failed", hr);
-    }
-    else
-    {
-        std::cout << "[Test] Spring stopped.\n";
-    }
-
-    fx->Release();
-    return true;
 }
 
 static void Cleanup()
@@ -603,10 +778,10 @@ static void Cleanup()
 
 int main()
 {
-    std::cout << "=== MOZA FFB UDP Steering Test ===\n";
-    std::cout << "Close Pit House before running.\n";
-    std::cout << "Click the test window if it appears.\n";
-    std::cout << "Start yellow_line_tracking.py from WSL after this is listening.\n\n";
+    std::cout << "=== MOZA FFB UDP Steering Test (Target Angle PD) ===\n";
+    std::cout << "Close MOZA Pit House before running.\n";
+    std::cout << "Run this program as Administrator.\n";
+    std::cout << "Start yellow_line_tracking.py after this program is listening.\n\n";
 
     if (!InitDirectInput())
     {
@@ -620,13 +795,27 @@ int main()
         return 1;
     }
 
-    EnumerateAxesAndEffects();
+    if (!EnumerateAxesAndEffects())
+    {
+        Cleanup();
+        return 1;
+    }
+
+    if (!ConfigureXAxisRange())
+    {
+        Cleanup();
+        return 1;
+    }
+
     TryDisableAutocenter();
 
-    RunLiveSteeringTest();
+    if (!CalibrateWheelCenter())
+    {
+        Cleanup();
+        return 1;
+    }
 
-    // Disabled during UDP steering testing so it does not unexpectedly move the wheel afterward.
-    // RunSpringTest();
+    RunLiveSteeringTest();
 
     Cleanup();
 
