@@ -28,7 +28,7 @@ The result is a mixed simulation/hardware demonstration: the vehicle drives arou
 
 
 ```text
-https://youtu.be/fo5TVMJ5C2c
+https://www.youtube.com/watch?v=fo5TVMJ5C2c
 ```
 
 The final system demonstrates an Ackermann steering car driving forward in Gazebo while following a yellow path painted on the ground plane. The car has a front-mounted camera sensor that publishes images from the vehicle's point of view. A Python ROS 2 node subscribes to this camera feed, finds the yellow line using cv2, finds the centroid of the visible line, and converts the offset from image center into a normalized steering command. It sends the steering value over UDP from WSL to Windows, where a C++ DirectInput controller converts it into force feedback commands for the MOZA wheel.
